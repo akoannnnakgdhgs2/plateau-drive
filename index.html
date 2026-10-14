@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>埼玉 PLATEAU ドライブ試作</title>
+<link href="https://cesium.com/downloads/cesiumjs/releases/1.127/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body,#cesiumContainer{margin:0;width:100%;height:100%;overflow:hidden;background:#15212a;font-family:system-ui,sans-serif}
+#hud{position:fixed;inset:0;pointer-events:none;color:#fff;text-shadow:0 1px 4px #000}
+.panel{background:#08111ddd;border:1px solid #ffffff35;border-radius:12px;padding:8px 10px;backdrop-filter:blur(5px)}
+#top{position:absolute;left:8px;right:8px;top:8px;display:flex;justify-content:space-between;gap:8px;align-items:start}
+#speed{font-size:23px;font-weight:850}#status{text-align:right;font-size:12px;max-width:58%}.small{font-size:10px;opacity:.88}
+#tools{position:absolute;right:8px;top:78px;display:flex;flex-direction:column;gap:6px;pointer-events:auto}
+button{background:#172b3beF;color:#fff;border:1px solid #ffffff55;border-radius:12px;padding:8px 10px;min-height:38px;font-size:12px;font-weight:700;touch-action:none}
+button:active,button.active{background:#087e91}
+#bottom{position:absolute;bottom:10px;left:8px;right:8px;display:flex;justify-content:space-between;align-items:end;gap:8px}
+#steer{display:flex;gap:8px}#drive{display:flex;flex-direction:column;gap:6px;align-items:end}
+#gears{display:flex;gap:4px}#gears button{min-width:38px;min-height:38px;padding:4px}
+#pedals{display:flex;gap:6px}#pedals button{min-width:64px;min-height:54px}
+#steer button{min-width:62px;min-height:64px}
+#help{position:absolute;top:77px;left:8px;max-width:54%;font-size:10px;line-height:1.35}
+#msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:none;background:#06121eee;padding:12px 15px;border-radius:12px;max-width:85%;font-size:13px;text-align:center}
+#loading{position:fixed;inset:0;background:#0c1822f2;color:#fff;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;z-index:20}
+#loading button{margin-top:14px}
+.cesium-viewer-bottom{display:none}
+@media(min-width:700px){#tools{top:95px}button{font-size:13px}#help{top:94px}}
+</style>
+</head>
+<body>
+<div id="cesiumContainer"></div>
+<div id="loading"><div><h2>埼玉 PLATEAU ドライブ</h2><p id="loadText">地図と3D都市データを準備中…<br>初回は読み込みに時間がかかる場合があります。</p><button id="retry" style="display:none">もう一度読み込む</button></div></div>
+<div id="hud">
+ <div id="top">
+  <div class="panel"><div><span id="speed">0</span> <span class="small">km/h</span></div><div class="small">ギア <b id="gearLabel">P</b> · <span id="assist">支援 OFF</span></div></div>
+  <div class="panel" id="status">埼玉県・鴻巣市<br><span class="small" id="cityStatus">PLATEAU接続中</span></div>
+ </div>
+ <div id="help" class="panel">試作版：地図上を移動するデモです。<br>実際の道路走行・車両物理は未完成。<br>3D建物はPLATEAU配信データを使用。</div>
+ <div id="tools">
+  <button id="cam">カメラ：追従</button>
+  <button id="topCam">俯瞰ビュー</button>
+  <button id="lines">予測線 ON</button>
+  <button id="auto">自動ブレーキ ON</button>
+  <button id="assistBtn">運転支援 OFF</button>
+  <button id="city">都市：鴻巣市</button>
+ </div>
+ <div id="bottom">
+  <div id="steer"><button id="left">◀<br>左</button><button id="right">▶<br>右</button></div>
+  <div id="drive">
+   <div id="gears" class="panel"><button data-g="P" class="active">P</button><button data-g="R">R</button><button data-g="N">N</button><button data-g="D">D</button></div>
+   <div id="pedals"><button id="brake">ブレーキ</button><button id="accel">アクセル</button></div>
+  </div>
+ </div>
+ <div id="msg"></div>
+</div>
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.127/Build/Cesium/Cesium.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+let viewer,tileset,carEntity,heading=0,speed=0,gear='P',accel=false,braking=false,left=false,right=false;
+let autoBrake=true,assistance=false,showLines=true,topView=false,camMode=0, cityIndex=0, tilesLoaded=false;
+const cities=[
+ {name:'鴻巣市',lon:139.5100,lat:36.0658,code:'11217'},
+ {name:'さいたま市',lon:139.6455,lat:35.8617,code:'11100'},
+ {name:'熊谷市',lon:139.3889,lat:36.1472,code:'11202'}
+];
+let carPos={lon:cities[0].lon,lat:cities[0].lat};
+function msg(s){$('msg').textContent=s;$('msg').style.display='block';clearTimeout(msg.timer);msg.timer=setTimeout(()=>$('msg').style.display='none',3800)}
+function status(s){$('cityStatus').textContent=s}
+async function findTiles(city){
+ const api='https://api.plateauview.mlit.go.jp/datacatalog/plateau-datasets';
+ const r=await fetch(api);if(!r.ok)throw new Error('PLATEAUデータカタログに接続できません');
+ const data=await r.json();
+ const rows=Array.isArray(data)?data:(data.datasets||data.data||[]);
+ const matches=rows.filter(d=>{
+   const pref=String(d.pref||d.pref_name||d.prefecture||'');
+   const c=String(d.city||d.city_name||d.name||'');
+   const fmt=String(d.format||d.type_en||'').toLowerCase();
+   return (pref.includes('埼玉')||String(d.pref_code||'')==='11') &&
+     (c.includes(city.name)||String(d.city_code||'')===city.code) &&
+     (fmt.includes('3d tiles')||fmt.includes('3dtiles')||String(d.format||'').toLowerCase().includes('3d'));
+ });
+ // Prefer a composite tileset URL when available; avoid guessing a dataset URL.
+ const found=matches.find(d=>d.composite_url)||matches.find(d=>d.url);
+ if(!found) throw new Error(city.name+'の3D Tilesデータをカタログから特定できませんでした。');
+ return found.composite_url||found.url;
+}
+async function loadCity(){
+ $('loading').style.display='flex';$('retry').style.display='none';$('loadText').textContent=cities[cityIndex].name+'の3D都市データを検索中…';
+ try{
+  if(!viewer){
+   viewer=new Cesium.Viewer('cesiumContainer',{
+    animation:false,timeline:false,baseLayerPicker:false,geocoder:false,homeButton:false,
+    sceneModePicker:false,navigationHelpButton:false,fullscreenButton:false,infoBox:false,
+    selectionIndicator:false,shouldAnimate:true,terrainProvider:new Cesium.EllipsoidTerrainProvider()
+   });
+   viewer.scene.globe.enableLighting=false;
+   viewer.scene.screenSpaceCameraController.minimumZoomDistance=5;
+   viewer.scene.screenSpaceCameraController.maximumZoomDistance=2000;
+   viewer.scene.globe.depthTestAgainstTerrain=false;
+  }
+  if(tileset){viewer.scene.primitives.remove(tileset);tileset=undefined}
+  const city=cities[cityIndex];carPos={lon:city.lon,lat:city.lat};
+  const url=await findTiles(city);
+  status('3D都市データ読み込み中…');
+  tileset=await Cesium.Cesium3DTileset.fromUrl(url,{maximumScreenSpaceError:20,maximumMemoryUsage:256});
+  viewer.scene.primitives.add(tileset);
+  await viewer.flyTo(tileset,{duration:1.5});
+  // Keep camera near chosen city, not a random edge of a broad tileset.
+  viewer.camera.flyTo({destination:Cesium.Cartesian3.fromDegrees(city.lon,city.lat,650),orientation:{heading:0,pitch:Cesium.Math.toRadians(-45),roll:0},duration:1.2});
+  if(carEntity)viewer.entities.remove(carEntity);
+  carEntity=viewer.entities.add({position:Cesium.Cartesian3.fromDegrees(carPos.lon,carPos.lat,3),box:{dimensions:new Cesium.Cartesian3(3.8,1.5,7.5),material:Cesium.Color.fromCssColorString('#1297b5'),outline:true,outlineColor:Cesium.Color.WHITE},label:{text:'試作車',font:'13px sans-serif',fillColor:Cesium.Color.WHITE,outlineColor:Cesium.Color.BLACK,outlineWidth:2,style:Cesium.LabelStyle.FILL_AND_OUTLINE,verticalOrigin:Cesium.VerticalOrigin.BOTTOM,pixelOffset:new Cesium.Cartesian2(0,-12)}});
+  tilesLoaded=true;status('PLATEAU建物を表示中');$('loading').style.display='none';msg(city.name+'のPLATEAUデータを読み込みました。車は試作段階です。');
+ }catch(e){
+  console.error(e);status('データ未接続');
+  $('loadText').textContent='読み込みに失敗しました。配信APIや通信環境によって利用できない場合があります。\\n'+(e.message||'不明なエラー');
+  $('retry').style.display='inline-block';
+ }
+}
+function updateCar(dt){
+ if(!viewer||!carEntity)return;
+ if(gear==='P'||gear==='N'){speed*=Math.pow(.02,dt)}
+ else{
+  const dir=gear==='R'?-1:1;
+  if(accel&&!braking)speed+=dir*2.5*dt;
+  if(braking)speed*=Math.pow(.002,dt);
+  if(autoBrake&&Math.abs(speed)>0.1&&Math.abs(speed)<2.78){
+    // No reliable 3D road/obstacle collision has been built yet.
+    // This demo brakes only when the user holds brake or the prototype safety toggle is active near buildings is not yet wired to geometry.
+  }
+  speed=Math.max(-5,Math.min(9,speed));
+  let steer=(left?-1:0)+(right?1:0);
+  if(assistance)steer*=.65;
+  heading+=steer*speed*.035*dt;
+  const meters=speed*dt;
+  const latRad=carPos.lat*Math.PI/180;
+  carPos.lat+=Math.cos(heading)*meters/111320;
+  carPos.lon+=Math.sin(heading)*meters/(111320*Math.max(.1,Math.cos(latRad)));
+ }
+ carEntity.position=Cesium.Cartesian3.fromDegrees(carPos.lon,carPos.lat,3);
+ carEntity.orientation=Cesium.Transforms.headingPitchRollQuaternion(carEntity.position,new Cesium.HeadingPitchRoll(heading,0,0));
+ $('speed').textContent=Math.round(Math.abs(speed)*3.6);$('gearLabel').textContent=gear;$('assist').textContent=assistance?'支援 ON':'支援 OFF';
+ if(topView){
+  viewer.camera.lookAt(carEntity.position,new Cesium.HeadingPitchRange(heading,Cesium.Math.toRadians(-85),95));
+ }else if(camMode===0){
+  const pos=Cesium.Cartesian3.fromDegrees(carPos.lon,carPos.lat,70);
+  viewer.camera.lookAt(carEntity.position,new Cesium.HeadingPitchRange(heading,Cesium.Math.toRadians(-22),70));
+ }else{
+  viewer.camera.lookAt(carEntity.position,new Cesium.HeadingPitchRange(heading+Math.PI,Cesium.Math.toRadians(-18),42));
+ }
+}
+let last=performance.now();
+function loop(now){const dt=Math.min((now-last)/1000,.05);last=now;updateCar(dt);requestAnimationFrame(loop)}requestAnimationFrame(loop);
+function hold(id,key){const b=$(id);const on=e=>{e.preventDefault();window[key]=true;b.classList.add('active')};const off=e=>{e.preventDefault();window[key]=false;b.classList.remove('active')};b.addEventListener('pointerdown',on);['pointerup','pointercancel','pointerleave'].forEach(x=>b.addEventListener(x,off))}
+hold('accel','accel');hold('brake','braking');hold('left','left');hold('right','right');
+document.querySelectorAll('[data-g]').forEach(b=>b.onclick=()=>{gear=b.dataset.g;document.querySelectorAll('[data-g]').forEach(x=>x.classList.toggle('active',x===b));if(gear==='R')msg('後退ギア。周囲を確認して操作してね。')});
+$('cam').onclick=()=>{camMode=(camMode+1)%2;topView=false;$('cam').textContent='カメラ：'+(camMode?'後方':'追従')};
+$('topCam').onclick=()=>{topView=!topView;$('topCam').textContent=topView?'俯瞰ビュー ON':'俯瞰ビュー';if(!topView&&viewer)viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY)};
+$('lines').onclick=()=>{showLines=!showLines;$('lines').textContent='予測線 '+(showLines?'ON':'OFF');msg('予測線の描画は次の段階で車両モデルに接続します。')};
+$('auto').onclick=()=>{autoBrake=!autoBrake;$('auto').textContent='自動ブレーキ '+(autoBrake?'ON':'OFF');msg('自動ブレーキ設定を変更しました。障害物検知との接続は未実装です。')};
+$('assistBtn').onclick=()=>{assistance=!assistance;$('assistBtn').textContent='運転支援 '+(assistance?'ON':'OFF')};
+$('city').onclick=()=>{cityIndex=(cityIndex+1)%cities.length;$('city').textContent='都市：'+cities[cityIndex].name;loadCity()};
+$('retry').onclick=loadCity;
+loadCity();
+</script>
+</body>
+</html>
