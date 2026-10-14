@@ -89,8 +89,8 @@ async function loadCity(){
  try{
   if(!viewer){
    viewer=new Cesium.Viewer('cesiumContainer',{
-    animation:false,timeline:false,baseLayerPicker:false,geocoder:false,homeButton:false,
-    sceneModePicker:false,navigationHelpButton:false,fullscreenButton:false,infoBox:false,
+ scene3DOnly:true,
+ animation:false,timeline:false,baseLayerPicker:false,geocoder:false,homeButton:false,navigationHelpButton:false,fullscreenButton:false,infoBox:false,
     selectionIndicator:false,shouldAnimate:true,terrainProvider:new Cesium.EllipsoidTerrainProvider()
    });
    viewer.scene.globe.enableLighting=false;
